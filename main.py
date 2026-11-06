@@ -8,6 +8,10 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 # 设置日志记录
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+}
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 你好！请将小红书或抖音的分享链接发送给我，我会为你提取无水印高清原图！")
 
@@ -23,9 +27,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ 正在为你提取无水印高清图片，请稍等...")
     
     try:
-        # 调用无水印解析接口
-        api_url = f"https://api.pearktrue.cn/api/all/parse.php?url={target_url}"
-        response = requests.get(api_url, timeout=15).json()
+        # 第一步：自动将小红书/抖音短链接还原为长链接
+        res = requests.get(target_url, headers=HEADERS, allow_redirects=True, timeout=10)
+        real_url = res.url
+        
+        # 第二步：调用无水印解析接口
+        api_url = f"https://api.pearktrue.cn/api/all/parse.php?url={real_url}"
+        response = requests.get(api_url, headers=HEADERS, timeout=15).json()
         
         images = []
         if response.get("code") == 200 and "data" in response:
