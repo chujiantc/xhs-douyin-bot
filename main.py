@@ -8,40 +8,46 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-def remove_watermark_tophat(image_bytes):
+def remove_watermark_hsv(image_bytes):
     """
-    使用顶帽变换 (Top-Hat) 精准提取浅色/白色水印笔画，
-    不误伤浅色背景与人物线条，彻底解决大面积涂抹变形问题。
+    通过 HSV 色彩空间精准抓取白色水印，
+    强制排除黑色轮廓线与彩色衣服，彻底杜绝黑色墨迹涂抹变形。
     """
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     h, w = img.shape[:2]
 
-    # 1. 锁定右下角区域 (高度 70%~100%，宽度 65%~100%)
-    y1, y2 = int(h * 0.70), h
+    # 1. 锁定右下角区域 (高度 72%~100%，宽度 65%~100%)
+    y1, y2 = int(h * 0.72), h
     x1, x2 = int(w * 0.65), w
     roi = img[y1:y2, x1:x2]
 
-    # 2. 转灰度图
-    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    # 2. 转 HSV 色彩空间
+    hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
-    # 3. 顶帽变换 (Top-Hat)：专门提取比背景亮的小结构（文字笔画、图标轮廓），忽略大片浅色背景
-    kernel_tophat = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
-    tophat = cv2.morphologyEx(gray_roi, cv2.MORPH_TOPHAT, kernel_tophat)
+    # 3. 提取白色/浅灰色水印 (低饱和度 S < 50，高亮度 V > 180)
+    white_mask = cv2.inRange(hsv_roi, np.array([0, 0, 180]), np.array([180, 50, 255]))
 
-    # 4. 对顶帽提取出的细节进行二值化，只保留高亮笔画
-    _, binary_mask = cv2.threshold(tophat, 35, 255, cv2.THRESH_BINARY)
+    # 4. 提取黑色轮廓线与暗色区域 (V < 90)，这些区域必须绝对保护！
+    dark_mask = cv2.inRange(hsv_roi, np.array([0, 0, 0]), np.array([180, 255, 90]))
 
-    # 5. 微弱膨胀蒙版，确保覆盖字符边缘羽化
-    kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    dilated_mask = cv2.dilate(binary_mask, kernel_dilate, iterations=1)
+    # 5. 提取高饱和度色彩 (S > 60，如红衣服、嘴巴等)，这些区域也必须保护！
+    color_mask = cv2.inRange(hsv_roi, np.array([0, 60, 0]), np.array([180, 255, 255]))
 
-    # 6. 还原为全图蒙版
+    # 6. 最终蒙版 = 白色区域 MINUS 黑色线条 MINUS 鲜艳色彩
+    final_roi_mask = cv2.bitwise_and(white_mask, cv2.bitwise_not(dark_mask))
+    final_roi_mask = cv2.bitwise_and(final_roi_mask, cv2.bitwise_not(color_mask))
+
+    # 7. 微膨胀 1 像素，仅覆盖水印字体边缘
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    dilated_mask = cv2.dilate(final_roi_mask, kernel, iterations=1)
+
+    # 8. 映射回全图蒙版
     full_mask = np.zeros((h, w), dtype=np.uint8)
     full_mask[y1:y2, x1:x2] = dilated_mask
 
-    # 7. 仅对笔画线条做精准微缝修补 (inpaintRadius=2，绝不拉扯周围画质)
-    inpainted = cv2.inpaint(img, full_mask, inpaintRadius=2, flags=cv2.INPAINT_TELEA)
+    # 9. 使用 Navier-Stokes 算法微缝平滑，半径仅为 2
+    inpainted = cv2.inpaint(img, full_mask, inpaintRadius=2, flags=cv2.INPAINT_NS)
 
     _, buffer = cv2.imencode(".jpg", inpainted, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
     return buffer.tobytes()
@@ -56,12 +62,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(photo_file.file_id)
         image_bytes = await file.download_as_bytearray()
         
-        clean_bytes = remove_watermark_tophat(image_bytes)
+        clean_bytes = remove_watermark_hsv(image_bytes)
         
         await update.message.reply_document(
             document=io.BytesIO(clean_bytes),
             filename="clean_image.jpg",
-            caption="✨ 已为你精准无痕消除小红书水印！"
+            caption="✨ 已为你无痕消除小红书水印！"
         )
     except Exception as e:
         logging.error(f"处理图片出错: {e}")
